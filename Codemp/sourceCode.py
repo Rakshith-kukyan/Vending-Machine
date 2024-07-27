@@ -1,12 +1,17 @@
-import board, busio, displayio, os, time
+import board, busio, displayio, os, pwmio, time
 import terminalio  # Just a font
 import adafruit_ili9341
 from adafruit_display_text import label
 import digitalio
+import microcontroller
+from adafruit_motor import servo
+
+SERVO_STATE_FILE = "/servo_state.txt"
 
 def setup():
-    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, colPins, rowPins, rows, cols, current_text_group, j, count, v
-
+    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, noItems
+    global colPins, rowPins, rows, cols, current_text_group, j, count, v,idl,uart,idls
+    uart = busio.UART(board.GP16, board.GP17, baudrate=9600)
     am1={}
     am2={}
     amount=0
@@ -16,7 +21,7 @@ def setup():
 
     print(f"Board: {board_type}")
 
-    cs_pin, reset_pin, dc_pin, mosi_pin, clk_pin = board.GP18, board.GP17, board.GP16, board.GP15, board.GP14
+    cs_pin, reset_pin, dc_pin, mosi_pin, clk_pin = board.GP18, board.GP19, board.GP20, board.GP15, board.GP14
 
     spi = busio.SPI(clock=clk_pin, MOSI=mosi_pin)
 
@@ -52,10 +57,11 @@ def setup():
     t={'1':5, '2':25, '3':10, '4':15, '5':20, '6':50, "Enter":'Enter'}
     u={'1':1, '2':1, '3':1, '4':1, '5':1, '6':1}
     w={'1':39, '2':54, '3':69, '4':84, '5':99, '6':114, "Enter": 100}
+    noItems={'1':1, '2':1, '3':1, '4':1, '5':1, '6':1}
 
 
-    colPins = [board.GP4, board.GP5, board.GP6, board.GP7]
-    rowPins = [board.GP0, board.GP19, board.GP1, board.GP2]
+    colPins = [board.GP9, board.GP8, board.GP7, board.GP6]
+    rowPins = [board.GP5, board.GP4, board.GP1, board.GP0]
 
     rows = []
     cols = []
@@ -73,6 +79,37 @@ def setup():
         col.pull = digitalio.Pull.DOWN
         cols.append(col)
     
+    check_signal_strength()
+    # Send AT command to set SMS mode to text
+    send_at_command('AT+CMGF=1', 1)
+
+def send_at_command(command, delay=1):
+    uart.write(bytes(command + '\r\n', 'utf-8'))
+    response = uart.read(256)  # Read up to 256 bytes
+    if response:
+        print(response.decode('utf-8'))
+        decoded_response=str(response.decode('utf-8'))
+    else:
+        print("No response for command:", command)
+        return ""
+    return decoded_response
+
+def check_signal_strength():
+    send_at_command('AT+CSQ', 1)
+
+def check_sms():
+    # Send AT command to list all unread SMS
+    response=send_at_command('AT+CMGL="REC UNREAD"', 3)
+    if response:
+        start_index = response.find("+CMGL:")
+        if start_index != -1:
+            end_index = response.find("\n", start_index)
+            if end_index != -1:
+                sms_data = response[start_index:end_index]
+                sms_content_start = response.find("\n", end_index)
+                sms_content = response[sms_content_start:].strip()
+                return sms_content
+            
 def printtext(text,x,n,l):
     global current_text_group,v
     if (n==0 ):
@@ -98,14 +135,18 @@ def starttext():
     splash.append(inner_sprite)
     text = "\n\n\n\t  Welcome \n        to \n StationaryCart!!"
     printtext(text,2,1,24)
-
     time.sleep(2)
     j=0
     count=0
     v={}
-    id=""
+    idl=""
     idls=[]
     
+def scanStart():
+    while True:
+        key1 = scanKeypad()
+        if key1=='Enter':
+            break
     text = "Please Choose your \nproduct"
     printtext(text,2,0,24)
 
@@ -120,7 +161,7 @@ def scanKeypad():
     return None
 
 def printKey():
-    global amount,am1,am2,count
+    global amount,am1,am2,count,noItems
     key = scanKeypad()
     j=0
     if key=="Enter":
@@ -135,13 +176,12 @@ def printKey():
                 splash.pop()
             text="\n\n\nTotal is: {}\nPay through UPI\n..........\n..........\nPress Enter if done".format(amount)
             printtext(text,2,1,j)
-            payver()
+            return 2
             
     elif key=="Cancel":
-        while len(splash) > 0:
-            splash.pop()
-        return True
-    elif key:
+        # Perform a software reset
+        microcontroller.reset()
+    elif key=='1' or key=='2' or key=='3' or key=='4' or key=='5' or key=='6':
         text="\n\n\n\nProduct: {} Price = {} X {}".format(key,t[key],u[key])
         j=w[key]
         am1[key]=int(t[key])
@@ -149,64 +189,122 @@ def printKey():
         if u[key]>1:
             splash.remove(v[j])
         u[key]+=1
+        noItems[key]+=1
         print(text,key,w[key],j)
         printtext(text,1,1,j)
     time.sleep(0.2)
-    return False
+    return 0 
     
 def payver():
-    printtext("Enter Last 4 digits\nof Transaction ID",2,1,24)
-    printtext(id,1,1,24)
+    global amount,idl,idls,count
+    while len(splash) > 0:
+        splash.pop()
+    printtext("Please wait\nwhile we verify\nthe payment",2,1,24)
+    bal=0
+    while bal==0:
+        sms_content=check_sms()  # Check for SMS messages
+        if sms_content:
+            bal_s=sms_content.find("BCB:Rs. ")
+            if sms_content[bal_s:bal_s+8]=="BCB:Rs. ":
+                bal_s=bal_s+8
+                bal_e=sms_content.find(" credited")
+                bal=float(sms_content[bal_s:bal_e])
+                upi_s=sms_content.find("UPI/")
+                upi_s=upi_s+12
+                upi=int(sms_content[upi_s:upi_s+4])
+                print(f"\nReceived Amount:\n{bal} Transation ID: {upi}\n")
+    printtext("Enter Last 4 digits\nof Transaction ID",2,0,24)
+    idl=""
+    idls=[]
     while True:
         key = scanKeypad()
         if key=="Cancel":
-            while len(splash) > 0:
-                splash.pop()
-            return True
+            # Perform a software reset
+            microcontroller.reset()
         elif key=="Delete":
             idls.pop()
             count=count-1
-            id=""
+            idl=""
             for i in idls:
-                id=id+i
-        elif key=="Enter" && len(id)==4:
-            return False
-        else:
-            id=id+key
+                idl=idl+i
+            printtext(idl,2,0,95)
+        elif key=="Enter" and len(idl)==4:
+            if idl==str(upi) and amount==bal:
+                return True
+            else:
+                return False
+        elif key=='1' or key=='2' or key=='3' or key=='4' or key=='5' or key=='6' or key=='7' or key=='8' or key=='9' or key=='0':
+            idl=idl+key
             idls.append(key)
             count=count+1
-        printtext(id,2,0,45)
+            printtext(idl,2,1,95)
+        time.sleep(0.2)
+            
+def save_servo_state(serAngle):
+    """Save the servo angles to a file."""
+    with open(SERVO_STATE_FILE, "w") as f:
+        for angle in serAngle:
+            f.write(f"{angle}\n")
 
+def load_servo_state():
+    """Load the servo angles from a file."""
+    try:
+        with open(SERVO_STATE_FILE, "r") as f:
+            return [int(line.strip()) for line in f.readlines()]
+    except (OSError, ValueError):
+        return [0] * 6  # Default to all zeros if there's an error    
+        
+def dispense():
+    global noItems
+    serv= []
+    serAngle=load_servo_state()
+    j=0
+    servo_pin = [board.GP13, board.GP12, board.GP11, board.GP10, board.GP3, board.GP2]
+    for ser in servo_pin:
+        pwm = pwmio.PWMOut(ser, frequency=50)
+        serv.append(servo.Servo(pwm, min_pulse=580, max_pulse=2500))
+        serv[j].angle = serAngle[j]
+        j+=1
+    for i in range(6):
+        key = str(i + 1)
+        while noItems[key] > 0 and serAngle[i] < 180:
+            serAngle[i] += 30
+            serv[i].angle = serAngle[i]
+            noItems[key] -= 1
+            save_servo_state(serAngle)  # Save the state after each move
+            time.sleep(2.0)
+            
 def main():
     while True:
         setup()
         starttext()
+        scanStart()
         while True:
-            if printKey():
-                break
+            result=printKey()
+            if result==1:
+                # Perform a software reset
+                microcontroller.reset()
+            elif result==2:
+                if payver():
+                    while len(splash) > 0:
+                        splash.pop()
+                    print("Payment verified successfully")
+                    text = "\n\n\n\t  Payment \n    verified \n  successfully!!"
+                    printtext(text,2,1,24)
+                    dispense()
+                    result==1
+                    time.sleep(2)
+                    # Perform a software reset
+                    microcontroller.reset()
+                else:
+                    while len(splash) > 0:
+                        splash.pop()
+                    print("Payment verification failed")
+                    text = "\n\n\n\t  Payment \n  verificaton \n       failed!!"
+                    printtext(text,2,1,24)
+                    result==1
+                    time.sleep(2)
+                    # Perform a software reset
+                    microcontroller.reset()
 
 main()
-
-'''
-Next:
-id=""
-ls=[]
-count=0
-while True:
-        key = input("Enter: ")
-        if key=="Cancel":
-            while len(splash) > 0:
-                splash.pop()
-            reset()
-        elif key=="Delete":
-            ls.pop()
-            count=count-1
-            id=""
-            for i in ls:
-                id=id+i
-        else:
-            id=id+key
-            ls.append(key)
-            count=count+1
-        print(id)
-'''
