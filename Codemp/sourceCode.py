@@ -9,17 +9,14 @@ from adafruit_motor import servo
 SERVO_STATE_FILE = "/servo_state.txt"
 
 def setup():
-    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, noItems
+    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, noItems, avProd
     global colPins, rowPins, rows, cols, current_text_group, j, count, v,idl,uart,idls
     uart = busio.UART(board.GP16, board.GP17, baudrate=9600)
     am1={}
     am2={}
     amount=0
+    avProd= load_servo_state()
     displayio.release_displays()
-
-    board_type = os.uname().machine
-
-    print(f"Board: {board_type}")
 
     cs_pin, reset_pin, dc_pin, mosi_pin, clk_pin = board.GP18, board.GP19, board.GP20, board.GP15, board.GP14
 
@@ -90,8 +87,11 @@ def send_at_command(command, delay=1):
         print(response.decode('utf-8'))
         decoded_response=str(response.decode('utf-8'))
     else:
-        print("No response for command:", command)
-        return ""
+        text = "\n\n\n\t  Service \n  Unavailable!"
+        printtext(text,2,1,24)
+        time.sleep(5)
+        # Perform a software reset
+        microcontroller.reset()
     return decoded_response
 
 def check_signal_strength():
@@ -161,7 +161,7 @@ def scanKeypad():
     return None
 
 def printKey():
-    global amount,am1,am2,count,noItems
+    global amount,am1,am2,count,noItems,avProd
     key = scanKeypad()
     j=0
     if key=="Enter":
@@ -181,6 +181,12 @@ def printKey():
     elif key=="Cancel":
         # Perform a software reset
         microcontroller.reset()
+    elif (avProd[0]==180 and key=='1') or (avProd[1]==180 and key=='2') or (avProd[2]==180 and key=='3') or (avProd[3]==180 and key=='4') or (avProd[4]==180 and key=='5') or (avProd[5]==180 and key=='6'):
+        text="\n\n\n\n\n\n\n\n\n\nProduct: {} No more available".format(key)
+        j=w[key]
+        printtext(text,1,1,j)
+        time.sleep(0.2)
+        continue
     elif key=='1' or key=='2' or key=='3' or key=='4' or key=='5' or key=='6':
         text="\n\n\n\nProduct: {} Price = {} X {}".format(key,t[key],u[key])
         j=w[key]
@@ -189,6 +195,7 @@ def printKey():
         if u[key]>1:
             splash.remove(v[j])
         u[key]+=1
+        avProd[int(key)-1]+=30
         noItems[key]+=1
         print(text,key,w[key],j)
         printtext(text,1,1,j)
@@ -201,7 +208,9 @@ def payver():
         splash.pop()
     printtext("Please wait\nwhile we verify\nthe payment",2,1,24)
     bal=0
-    while bal==0:
+    count=0
+    payment=False
+    while bal!=amount and count<30:
         sms_content=check_sms()  # Check for SMS messages
         if sms_content:
             bal_s=sms_content.find("BCB:Rs. ")
@@ -213,6 +222,10 @@ def payver():
                 upi_s=upi_s+12
                 upi=int(sms_content[upi_s:upi_s+4])
                 print(f"\nReceived Amount:\n{bal} Transation ID: {upi}\n")
+                payment=True
+        count+=1
+    if payment==False:
+        return False
     printtext("Enter Last 4 digits\nof Transaction ID",2,0,24)
     idl=""
     idls=[]
