@@ -9,13 +9,16 @@ from adafruit_motor import servo
 SERVO_STATE_FILE = "/servo_state.txt"
 
 def setup():
-    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, noItems, avProd
-    global colPins, rowPins, rows, cols, current_text_group, j, count, v,idl,uart,idls
+    global am1, am2, amount, display, splash, color_bitmap, color_palette, keyMatrix, t, u, w, noItems, avProd, loadProd
+    global colPins, rowPins, rows, cols, current_text_group, j, count, v,idl,uart,idls,SERVO_ANGLES_SIZE
     uart = busio.UART(board.GP16, board.GP17, baudrate=9600)
+    loadProd=0
     am1={}
     am2={}
     amount=0
+    SERVO_ANGLES_SIZE = 6
     avProd= load_servo_state()
+    print(avProd)
     displayio.release_displays()
 
     cs_pin, reset_pin, dc_pin, mosi_pin, clk_pin = board.GP18, board.GP19, board.GP20, board.GP15, board.GP14
@@ -54,7 +57,7 @@ def setup():
     t={'1':5, '2':25, '3':10, '4':15, '5':20, '6':50, "Enter":'Enter'}
     u={'1':1, '2':1, '3':1, '4':1, '5':1, '6':1}
     w={'1':39, '2':54, '3':69, '4':84, '5':99, '6':114, "Enter": 100}
-    noItems={'1':1, '2':1, '3':1, '4':1, '5':1, '6':1}
+    noItems={'1':0, '2':0, '3':0, '4':0, '5':0, '6':0}
 
 
     colPins = [board.GP9, board.GP8, board.GP7, board.GP6]
@@ -109,7 +112,39 @@ def check_sms():
                 sms_content_start = response.find("\n", end_index)
                 sms_content = response[sms_content_start:].strip()
                 return sms_content
-            
+
+def productLoaded():
+    while len(splash) > 0:
+        splash.pop()
+    text = "\n\n\n\t Products \n    Reloading"
+    printtext(text,2,1,24)
+    products=[0]*6
+    save_servo_state(products)
+    serv= []
+    serAngle=load_servo_state()
+    j=0
+    servo_pin = [board.GP13, board.GP12, board.GP11, board.GP10, board.GP3, board.GP2]
+    for ser in servo_pin:
+        pwm = pwmio.PWMOut(ser, frequency=50)
+        serv.append(servo.Servo(pwm, min_pulse=580, max_pulse=2500))
+        serv[j].angle = serAngle[j]
+        j+=1
+    time.sleep(5)
+    # Perform a software reset
+    microcontroller.reset()
+    
+def save_servo_state(serAngle):
+    """Save the servo angles to non-volatile memory."""
+    data = bytearray(SERVO_ANGLES_SIZE)
+    for i, angle in enumerate(serAngle):
+        data[i] = angle
+    microcontroller.nvm[0:SERVO_ANGLES_SIZE] = data
+
+def load_servo_state():
+    """Load the servo angles from non-volatile memory."""
+    data = microcontroller.nvm[0:SERVO_ANGLES_SIZE]
+    return [int(angle) for angle in data]
+
 def printtext(text,x,n,l):
     global current_text_group,v
     if (n==0 ):
@@ -149,6 +184,7 @@ def scanStart():
             break
     text = "Please Choose your \nproduct"
     printtext(text,2,0,24)
+    time.sleep(0.2)
 
 def scanKeypad():
     for rowIndex, row in enumerate(rows):
@@ -161,14 +197,14 @@ def scanKeypad():
     return None
 
 def printKey():
-    global amount,am1,am2,count,noItems,avProd
+    global amount,am1,am2,count,noItems,avProd,loadProd
     key = scanKeypad()
     j=0
     if key=="Enter":
         if count==0:
             for ob in am1:
                 amount+=am1[ob]*am2[ob]
-                text="\n\n\n\n\n\n\n\n\n\nTotal is: {}\nPress Enter to Continue".format(amount)
+            text="\n\n\n\n\n\n\n\n\n\nTotal is: {}\nPress Enter to Continue".format(amount)
             printtext(text,2,1,j)
             count=count+1
         else:
@@ -186,7 +222,7 @@ def printKey():
         j=w[key]
         printtext(text,1,1,j)
         time.sleep(0.2)
-        continue
+        return 0
     elif key=='1' or key=='2' or key=='3' or key=='4' or key=='5' or key=='6':
         text="\n\n\n\nProduct: {} Price = {} X {}".format(key,t[key],u[key])
         j=w[key]
@@ -199,6 +235,10 @@ def printKey():
         noItems[key]+=1
         print(text,key,w[key],j)
         printtext(text,1,1,j)
+    elif key=='*':
+        loadProd+=1
+        if loadProd==8:
+            productLoaded()
     time.sleep(0.2)
     return 0 
     
@@ -251,21 +291,7 @@ def payver():
             idls.append(key)
             count=count+1
             printtext(idl,2,1,95)
-        time.sleep(0.2)
-            
-def save_servo_state(serAngle):
-    """Save the servo angles to a file."""
-    with open(SERVO_STATE_FILE, "w") as f:
-        for angle in serAngle:
-            f.write(f"{angle}\n")
-
-def load_servo_state():
-    """Load the servo angles from a file."""
-    try:
-        with open(SERVO_STATE_FILE, "r") as f:
-            return [int(line.strip()) for line in f.readlines()]
-    except (OSError, ValueError):
-        return [0] * 6  # Default to all zeros if there's an error    
+        time.sleep(0.2)   
         
 def dispense():
     global noItems
@@ -278,14 +304,17 @@ def dispense():
         serv.append(servo.Servo(pwm, min_pulse=580, max_pulse=2500))
         serv[j].angle = serAngle[j]
         j+=1
+        print(serAngle)
     for i in range(6):
         key = str(i + 1)
+        print(serAngle, noItems[key])
         while noItems[key] > 0 and serAngle[i] < 180:
             serAngle[i] += 30
             serv[i].angle = serAngle[i]
             noItems[key] -= 1
             save_servo_state(serAngle)  # Save the state after each move
             time.sleep(2.0)
+        print(serAngle)
             
 def main():
     while True:
@@ -321,3 +350,4 @@ def main():
                     microcontroller.reset()
 
 main()
+
